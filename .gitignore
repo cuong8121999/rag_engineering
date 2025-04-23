@@ -1,0 +1,13 @@
+# Ignore the .env file to prevent sensitive information from being tracked
+.env
+logs/
+.venv/
+venv/
+chroma_db/
+dags/__pycache__/
+.minio.sys/
+plugins/__pycache__/
+__pycache__/
+gx_context/
+minio_data/
+gx/

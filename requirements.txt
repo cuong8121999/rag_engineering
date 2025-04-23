@@ -1,0 +1,9 @@
+emoji
+sentence-transformers
+great-expectations
+pandas
+minio
+selenium
+webdriver-manager
+langchain-chroma
+langchain-community
