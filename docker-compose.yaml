@@ -70,6 +70,7 @@ x-airflow-common:
     - ${PROJ_DIR:-.}/config:/opt/airflow/config
     - ${PROJ_DIR:-.}/plugins:/opt/airflow/plugins
     - ${PROJ_DIR:-.}/chroma_db:/opt/airflow/chroma_db
+    - ${PROJ_DIR:-.}/gx:/opt/airflow/gx
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     &airflow-common-depends-on
