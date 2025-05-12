@@ -37,8 +37,17 @@ def ingest_vnexpress(
     try:
         try:
             print("Opening the main webpage...")
-            driver.get(url)
-            time.sleep(5)
+            max_retries = 5
+            for attempt in range(max_retries):
+                try:
+                    driver.get(url)
+                    time.sleep(5)
+                    break
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        print(f"Attempt {attempt + 1} failed. Retrying...")
+                    else:
+                        raise e
 
             print("Getting the page source after JavaScript execution...")
             page_source = driver.page_source
@@ -54,9 +63,9 @@ def ingest_vnexpress(
             raise Exception(f"Error accessing the main page: {e}")
 
         for article in articles:
-            # if count > 2:
-            #     print("Reached the limit of 3 articles. Stopping further processing.")
-            #     break
+            if count > 2:
+                print("Reached the limit of 3 articles. Stopping further processing.")
+                break
 
             # Extract headline and link
             headline = article.get_text(strip=True)

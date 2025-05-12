@@ -111,14 +111,72 @@ def _read_json_file(
 
 
 def clean_text(text):
-    """Applies text cleaning process to extracted text."""
+    """Advanced text cleaning process for Vietnamese news articles"""
+    if not isinstance(text, str):
+        return ""
+
+    # Step 1: Remove all video player technical information more aggressively
+    # Remove all video player sections completely
+    text = re.sub(
+        r"Video Player is loading.*?End of dialog window\.",
+        "",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+
+    # Remove any remaining video technical data
+    text = re.sub(r"XemHiện tại\d+:\d+.*?Tiến trình: \d+%", "", text, flags=re.DOTALL)
+    text = re.sub(r"Đã tải:.*?Tắt tiếng", "", text, flags=re.DOTALL)
+    text = re.sub(r"Tỷ lệ phát lại.*?Chương mục", "", text, flags=re.DOTALL)
+    text = re.sub(
+        r"descriptions off.*?Audio Track", "", text, flags=re.IGNORECASE | re.DOTALL
+    )
+    text = re.sub(
+        r"This is a modal window.*?window\.", "", text, flags=re.DOTALL | re.IGNORECASE
+    )
+    text = re.sub(r"TextColorWhite.*?Font Size", "", text, flags=re.DOTALL)
+
+    # Step 2: Remove HTML-like tags more thoroughly
+    text = re.sub(r"<[^>]+>", " ", text)
+
+    # Step 3: Normalize punctuation (keep periods and important punctuation)
+    text = re.sub(r"[-–—]", " - ", text)  # Keep hyphens with spaces
+    text = re.sub(r",", ", ", text)  # Add space after commas
+    text = re.sub(r"\.", ". ", text)  # Add space after periods
+    text = re.sub(r":", ": ", text)  # Add space after colons
+
+    # Step 4: Restore proper Vietnamese accents handling
+    # This is just basic - you might need more specialized handling depending on your needs
+
+    # Step 5: Fix spacing around quotes
+    text = re.sub(r'"([^"]*)"', r' "\1" ', text)
+
+    # Step 6: Normalize whitespace
+    text = re.sub(r"\s+", " ", text)
+
+    # Step 7: Remove any remaining boilerplate phrases
+    phrases_to_remove = [
+        "videoap",
+        "video:",
+        "ap",
+        "ảnh:",
+        "nguồn video:",
+        "toàn màn hình",
+        "tiến trình",
+        "chương mục",
+        "font family",
+        "window color",
+        "background color",
+        "edge style",
+        "text edge style",
+    ]
+    for phrase in phrases_to_remove:
+        text = re.sub(rf"{phrase}.*?\s", " ", text, flags=re.IGNORECASE)
+
+    # Step 8: Final cleaning
     text = text.lower()  # Convert to lowercase
-    # text = re.sub(
-    #     r"[^a-z0-9\s-]", "", text
-    # )  # Remove special characters (keep numbers and '-')
-    # text = unidecode.unidecode(text)  # Normalize Unicode
-    text = re.sub(r"\s+", " ", text).strip()  # Remove extra spaces
-    text = emoji.replace_emoji(text, replace="")  # Remove emojis
+    text = emoji.replace_emoji(text, replace="")  # Remove emoji
+    text = re.sub(r"\s+", " ", text).strip()  # Final whitespace normalization
 
     return text
 
@@ -166,74 +224,116 @@ def _process_articles(data: List[Dict]) -> List[Dict]:
 
     # Text splitter for chunking
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=200,  # Increased from 200 for more meaningful chunks
-        chunk_overlap=20,  # Increased overlap for better context
+        chunk_size=500,
+        chunk_overlap=100,
     )
-    logging.info("Initial Text Splitter Configuration")
 
-    # Field mapping for extraction
+    # Enhanced field mappings to capture more metadata
     field_mappings = {
         "headline": ("title", True),
         "description": ("description", True),
         "datePublished": ("published_date", False),
-        "@type": ("type", False),
+        "dateModified": ("last_modified", False),
+        "@type": ("category", False),
+        "keywords": ("keywords", True),
+        "news_keywords": ("news_keywords", True),
     }
 
-    # Process each article
     for article in data:
-        # First extract all metadata (everything except content)
+        # Extract metadata
         article_metadata = {}
 
-        logging.info("Extracting metadata from article")
-        # Extract mapped fields as metadata
+        # Extract mapped fields
         for source_field, (target_field, should_clean) in field_mappings.items():
-            if source_field in article:
+            if source_field in article and article[source_field]:
                 value = article[source_field]
-                if should_clean:
+                if should_clean and isinstance(value, str):
                     value = clean_text(value)
                 article_metadata[target_field] = value
 
-        logging.info("Extracting URL and tags from article")
-        # Extract URL (special case with nested structure)
+        # Extract URL
         if "mainEntityOfPage" in article and "@id" in article["mainEntityOfPage"]:
             article_metadata["url"] = article["mainEntityOfPage"]["@id"]
 
-        # Extract tags (special case with potential different formats)
+        # Better author handling
+        if "author" in article and isinstance(article["author"], dict):
+            author_data = article["author"]
+            author_info = {}
+            if "name" in author_data:
+                author_info["name"] = author_data["name"]
+            if "profile_link" in author_data and author_data["profile_link"]:
+                author_info["profile"] = author_data["profile_link"]
+            if author_info:
+                article_metadata["author"] = author_info
+
+        # Extract tags with better handling
         if "article:tag" in article:
             tags = article["article:tag"]
             if isinstance(tags, str):
-                tags = tags.split(",")
-            # Clean each tag
+                tags = [t.strip() for t in tags.split(",")]
+            elif isinstance(tags, list):
+                tags = [t for t in tags if isinstance(t, str)]
             article_metadata["tags"] = [clean_text(tag) for tag in tags]
 
-        logging.info("Extracting article content and splitting into chunks")
-        # Now handle content chunking
-        if "articleContent" in article:
+        # Handle related articles
+        if "relatedArticles" in article and isinstance(
+            article["relatedArticles"], list
+        ):
+            related = []
+            for rel_article in article["relatedArticles"]:
+                if "title" in rel_article and "link" in rel_article:
+                    related.append(
+                        {
+                            "title": (
+                                clean_text(rel_article["title"])
+                                if rel_article["title"]
+                                else ""
+                            ),
+                            "link": rel_article["link"],
+                        }
+                    )
+            if related:
+                article_metadata["related_articles"] = related
+
+        # Clean articleContent thoroughly
+        if "articleContent" in article and article["articleContent"]:
             content = article["articleContent"]
-            if content:
-                # Clean the content first
-                cleaned_content = clean_text(content)
 
-                # Split into chunks
-                chunks = text_splitter.split_text(cleaned_content)
+            # Remove video player text and other boilerplate
+            content = re.sub(r"Video Player is loading\.[^\n]*", "", content)
+            content = re.sub(r"This is a modal window\.[^\n]*", "", content)
+            content = re.sub(r"Beginning of dialog window\.[^\n]*", "", content)
+            content = re.sub(r"End of dialog window\.[^\n]*", "", content)
 
-                logging.info(
-                    "Adding article chunk content and metadata to cleaned data"
-                )
-                # Create a separate entry for each chunk with all metadata
-                for i, chunk in enumerate(chunks):
-                    chunk_entry = article_metadata.copy()  # Copy all metadata
-                    chunk_entry["content"] = chunk  # Add this specific chunk
-                    chunk_entry["chunk_id"] = i  # Add chunk identifier
-                    chunk_entry["total_chunks"] = len(chunks)  # Add total chunks info
+            # Remove technical video-related content
+            content = re.sub(
+                r"XemHiện tại[0-9:]+/Thời lượng[0-9:].*?Tiến trình: [0-9%]+",
+                "",
+                content,
+            )
 
-                    cleaned_data.append(chunk_entry)
-            else:
-                # If no content, still add the article with its metadata
-                article_metadata["content"] = ""
-                cleaned_data.append(article_metadata)
+            # Remove color settings and other technical params
+            content = re.sub(r"TextColorWhite.*?End of dialog window\.", "", content)
+
+            # Clean content
+            cleaned_content = clean_text(content)
+
+            # Split into chunks
+            chunks = text_splitter.split_text(cleaned_content)
+
+            # Create entries for chunks
+            for i, chunk in enumerate(chunks):
+                # Skip empty chunks
+                if not chunk.strip():
+                    continue
+
+                chunk_entry = article_metadata.copy()
+                chunk_entry["content"] = chunk
+                chunk_entry["chunk_id"] = i
+                chunk_entry["total_chunks"] = len(chunks)
+                cleaned_data.append(chunk_entry)
         else:
-            # If no content field, still add the article with its metadata
+            # Add metadata even without content
             article_metadata["content"] = ""
             cleaned_data.append(article_metadata)
 
@@ -299,7 +399,7 @@ def create_test_checkpoint(
 
 
 # Define persistence directory
-persist_directory = "./chroma_db"
+chroma_directory = "./chroma_db"
 
 
 def get_chromadb_client(force_new: bool = False) -> chromadb.PersistentClient:
@@ -323,7 +423,7 @@ def get_chromadb_client(force_new: bool = False) -> chromadb.PersistentClient:
 
     try:
         # Create client with persistence configuration
-        client = chromadb.PersistentClient(path=persist_directory)
+        client = chromadb.PersistentClient(path=chroma_directory)
 
         # Cache for reuse
         _chromadb_client = client

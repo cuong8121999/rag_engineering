@@ -22,11 +22,11 @@ if __name__ == "__main__":
         level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
     )
 
-    persist_directory = "./chroma_db"
+    chroma_directory = "./chroma_db"
 
     try:
         # Create client with persistence configuration
-        client = chromadb.PersistentClient(path=persist_directory)
+        client = chromadb.PersistentClient(path=chroma_directory)
     except Exception as e:
         logging.error(f"Error creating ChromaDB client: {e}")
         exit(1)
@@ -49,9 +49,18 @@ if __name__ == "__main__":
         "articles", embedding_function=embedding_function
     )
 
-    result = collection.query(query_texts=["Giá vàng 22/4"], n_results=3)
+    # Add this debugging code
+    collection_count = collection.count()
+    logging.info(f"Collection 'articles' contains {collection_count} documents")
 
-    question = "Giá vàng 22/4"
+    # Peek at existing data if any exists
+    if collection_count > 0:
+        sample = collection.peek(10)
+        logging.info(f"Sample document IDs: {sample['ids']}")
+
+    result = collection.query(query_texts=["cự bí thư"], n_results=3)
+
+    question = "cự bí thư"
     # FIXED: Process the result dictionary correctly
     print(f"\nSearch results for: '{question}'")
     print("-" * 50)

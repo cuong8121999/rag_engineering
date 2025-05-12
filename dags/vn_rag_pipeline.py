@@ -1,5 +1,7 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+from airflow.operators.python import BranchPythonOperator
+from airflow.operators.dummy import DummyOperator
 from datetime import datetime, timedelta
 
 # Import existing libraries
@@ -37,17 +39,11 @@ class SentenceTransformerEmbeddings:
         return self.model.encode(input).tolist()
 
 
-# Define persistence directory
-persist_directory = "./chroma_db"
-
 # Define default DAG arguments
 default_args = {
     "owner": "airflow",
-    "depends_on_past": False,
-    "email_on_failure": False,
-    "email_on_retry": False,
-    "retries": 1,
-    "retry_delay": timedelta(minutes=5),
+    "retries": 5,
+    "retry_delay": timedelta(minutes=1),
 }
 
 
@@ -150,7 +146,30 @@ with DAG(
         if result is None:
             raise ValueError(f"Validation failed for {input_file}")
 
+        # Store validation result in XCom for branching
+        validation_passed = result.get("validation_result", False)
+        context["ti"].xcom_push(key="validation_passed", value=validation_passed)
+
+        if not validation_passed:
+            logging.warning(
+                "Data validation detected quality issues - will skip embedding"
+            )
+
         return "Data validation completed successfully"
+
+    def decide_if_embedding_needed(**context):
+        """Decide whether to proceed with embedding based on validation results"""
+        ti = context["ti"]
+        validation_passed = ti.xcom_pull(
+            task_ids="validate_json_data", key="validation_passed"
+        )
+
+        if validation_passed:
+            logging.info("Validation passed - proceeding with embedding")
+            return "embed_text_and_save_vectordb"
+        else:
+            logging.warning("Validation failed - skipping embedding")
+            return "skip_embedding"
 
     # Task 3: Embed Text and Save to Vector DB
     def embed_text_and_save_vectordb_task(**context):
@@ -223,6 +242,62 @@ with DAG(
 
             suite.add_expectation(gxe.ExpectColumnValuesToNotBeNull(column="content"))
 
+            # Check date format with regex (more precise)
+            suite.add_expectation(
+                gxe.ExpectColumnValuesToMatchRegex(
+                    column="published_date",
+                    regex=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{4}$",
+                )
+            )
+
+            # Validate main article URL format
+            suite.add_expectation(
+                gxe.ExpectColumnValuesToMatchRegex(
+                    column="url",
+                    regex=r"^https://vnexpress\.net/[a-zA-Z0-9\-]+\.html$",
+                )
+            )
+
+            # Ensure chunk_id is less than total_chunks
+            suite.add_expectation(
+                gxe.ExpectColumnPairValuesAToBeGreaterThanB(
+                    column_A="total_chunks", column_B="chunk_id", or_equal=True
+                )
+            )
+
+            # Ensure chunk_id is non-negative
+            suite.add_expectation(
+                gxe.ExpectColumnValuesToBeBetween(column="chunk_id", min_value=0)
+            )
+
+            # Ensure total_chunks is positive
+            suite.add_expectation(
+                gxe.ExpectColumnValuesToBeBetween(column="total_chunks", min_value=1)
+            )
+
+            # Ensure content has minimum length
+            suite.add_expectation(
+                gxe.ExpectColumnValueLengthsToBeBetween(
+                    column="content",
+                    min_value=50,  # Adjust minimum content length as needed
+                    mostly=0.95,  # Allow some flexibility
+                )
+            )
+
+            # Content shouldn't contain video player leftover text
+            suite.add_expectation(
+                gxe.ExpectColumnValuesToNotMatchRegexList(
+                    column="content",
+                    regex_list=[
+                        r"video player",
+                        r"this is a modal window",
+                        r"xemhiện tại",
+                        r"tiến trình: [0-9]+%",
+                    ],
+                    mostly=0.98,  # Allow some flexibility
+                )
+            )
+
             suite.save()
 
             data_asset = pandas_datasource.add_dataframe_asset(name=table_name)
@@ -247,6 +322,7 @@ with DAG(
         input_bucket,
         model_name,
         embedded_field,
+        collection_name="articles",  # Use consistent collection name
     ):
         """Original embed_text_and_save_vectordb function implementation"""
         # Implementation stays the same but with the empty document filtering fix
@@ -256,10 +332,16 @@ with DAG(
                 return {"status": "error", "reason": "Failed to read input file"}
 
             embedding_function = SentenceTransformerEmbeddings(model_name)
-            collection_name = f"chunk_articles_{input_file.split('_')[0]}"
+
+            # Use consistent collection name
+            logging.info(f"Using collection: {collection_name}")
             collection = chromadb_client.get_or_create_collection(
                 collection_name, embedding_function=embedding_function
             )
+
+            # Log collection stats before adding
+            initial_count = collection.count()
+            logging.info(f"Collection contains {initial_count} documents before adding")
 
             valid_docs = []
             valid_metadatas = []
@@ -282,7 +364,8 @@ with DAG(
                     valid_metadatas.append(metadata)
 
             if valid_docs:
-                ids = [f"doc_{i}" for i in range(len(valid_docs))]
+                timestamp = datetime.now().strftime("%Y%m%d%H%M")
+                ids = [f"{timestamp}_doc_{i}" for i in range(len(valid_docs))]
                 batch_size = 100
 
                 for i in range(0, len(valid_docs), batch_size):
@@ -309,10 +392,19 @@ with DAG(
                         ids=filtered_ids,
                     )
 
+                # Log final stats
+                final_count = collection.count()
+                logging.info(
+                    f"Collection now contains {final_count} documents (+{final_count - initial_count})"
+                )
+
+                # Return more detailed information
                 return {
                     "status": "success",
                     "documents_processed": len(valid_docs),
                     "collection_name": collection_name,
+                    "initial_count": initial_count,
+                    "final_count": final_count,
                 }
             else:
                 return {
@@ -349,6 +441,20 @@ with DAG(
         provide_context=True,
     )
 
+    # Create the branching task
+    branch_task = BranchPythonOperator(
+        task_id="check_validation_result",
+        python_callable=decide_if_embedding_needed,
+        provide_context=True,
+        dag=dag,
+    )
+
+    # Create a task that runs when validation fails
+    skip_embedding = DummyOperator(
+        task_id="skip_embedding",
+        dag=dag,
+    )
+
     embed_task = PythonOperator(
         task_id="embed_text_and_save_vectordb",
         python_callable=embed_text_and_save_vectordb_task,
@@ -358,5 +464,6 @@ with DAG(
         },
     )
 
-    # Define task dependencies (sequential execution)
-    ingest_news >> clean_task >> validate_task >> embed_task
+    # New dependencies with branching
+    ingest_news >> clean_task >> validate_task >> branch_task
+    branch_task >> [embed_task, skip_embedding]
