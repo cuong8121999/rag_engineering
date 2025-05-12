@@ -246,7 +246,7 @@ with DAG(
             suite.add_expectation(
                 gxe.ExpectColumnValuesToMatchRegex(
                     column="published_date",
-                    regex=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{4}$",
+                    regex=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$",
                 )
             )
 
