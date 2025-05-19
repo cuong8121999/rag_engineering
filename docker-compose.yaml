@@ -44,6 +44,10 @@
 #
 # Feel free to modify this file to suit your needs.
 ---
+networks:
+  default:
+    name: datahub_network
+
 x-airflow-common:
   &airflow-common
   # In order to add custom dependencies or upgrade provider packages you can use your extended image.
@@ -62,7 +66,10 @@ x-airflow-common:
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
-    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
+    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:- acryl-datahub-airflow-plugin[plugin-v2] acryl-datahub==1.0.0 PyPDF2 python-slugify>=8.0.1}
+    AIRFLOW__CORE__DAGBAG_IMPORT_TIMEOUT: 3000
+    DATAHUB_METADATA_PLUGIN_ENABLED: 'true'
+    DATAHUB_GMS_URL: 'http://datahub-gms:8082'  # Points to DataHub GMS on the shared network
 
   volumes:
     - ${PROJ_DIR:-.}/dags:/opt/airflow/dags
@@ -306,7 +313,6 @@ services:
       <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
-
 volumes:
   postgres-db-volume:
   minio_data:
