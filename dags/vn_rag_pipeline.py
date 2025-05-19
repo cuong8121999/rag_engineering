@@ -3,6 +3,7 @@ from airflow.operators.python import PythonOperator
 from airflow.operators.python import BranchPythonOperator
 from airflow.operators.dummy import DummyOperator
 from datetime import datetime, timedelta
+from airflow.models import Variable
 
 # Import existing libraries
 from sentence_transformers import SentenceTransformer
@@ -464,6 +465,52 @@ with DAG(
         },
     )
 
-    # New dependencies with branching
-    ingest_news >> clean_task >> validate_task >> branch_task
+    from datahub.emitter.rest_emitter import DatahubRestEmitter
+    from datahub.emitter.mce_builder import make_dataset_urn
+    from datahub.emitter.mcp import MetadataChangeProposalWrapper
+    from datahub.metadata.schema_classes import DatasetPropertiesClass, ChangeTypeClass
+    import slugify  # python-slugify>=8.0.1
+
+    def push_news_datasets_to_datahub_task(**context):
+        ti = context["ti"]
+        json_file = ti.xcom_pull(task_ids="ingest_news", key="ingested_file")
+        json_bucket = ti.xcom_pull(task_ids="ingest_news", key="ingested_bucket")
+        articles = _read_json_file(get_minio_client(), json_file, json_bucket) or []
+
+        emitter = DatahubRestEmitter(
+            gms_server=Variable.get("DATAHUB_GMS", default_var="http://datahub-gms:8080")
+        )
+
+        for art in articles:
+            slug = slugify.slugify(art["headline"])[:200]
+            ds_urn = make_dataset_urn("news", slug, "PROD")
+
+            mcp = MetadataChangeProposalWrapper(
+                entityUrn=ds_urn,
+                entityType="dataset",
+                aspectName="datasetProperties",
+                aspect=DatasetPropertiesClass(
+                    name=art["headline"],
+                    description=art.get("description", ""),
+                    customProperties={
+                        "type":      art.get("@type", ""),
+                        "desc":      art.get("description", ""),
+                        "published": art.get("datePublished", ""),
+                        "author":    art.get("author", {}).get("name", ""),
+                        "keywords":  art.get("keywords", ""),
+                    },
+                ),
+                changeType=ChangeTypeClass.UPSERT,
+            )
+            emitter.emit(mcp)
+
+        return f"Pushed {len(articles)} datasets (minimal) to DataHub"
+
+    push_to_datahub = PythonOperator(
+        task_id="push_news_datasets_to_datahub",
+        python_callable=push_news_datasets_to_datahub_task,
+        provide_context=True,
+    )
+
+    ingest_news >> push_to_datahub >> clean_task >> validate_task >> branch_task
     branch_task >> [embed_task, skip_embedding]
